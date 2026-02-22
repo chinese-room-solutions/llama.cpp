@@ -21,6 +21,9 @@ struct llama_file {
     size_t size() const;
 
     int file_id() const; // fileno overload
+#ifdef _WIN32
+    void * win32_handle() const; // native HANDLE for Windows
+#endif
 
     void seek(size_t offset, int whence) const;
 

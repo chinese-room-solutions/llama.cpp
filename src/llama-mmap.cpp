@@ -76,11 +76,34 @@ struct llama_file::impl {
     }
 
     impl(const char * fname, const char * mode, [[maybe_unused]] const bool use_direct_io = false) {
-        fp = ggml_fopen(fname, mode);
-        if (fp == NULL) {
-            throw std::runtime_error(format("failed to open %s: %s", fname, strerror(errno)));
+        // Open directly with CreateFileW to avoid CRT mismatch when
+        // ggml_fopen lives in a DLL built with a different compiler
+        // (e.g. MSVC-built ggml DLLs + MinGW-built libllama.a).
+        DWORD access   = GENERIC_READ;
+        DWORD creation = OPEN_EXISTING;
+        if (mode[0] == 'w') {
+            access   = GENERIC_READ | GENERIC_WRITE;
+            creation = CREATE_ALWAYS;
+        } else if (std::strchr(mode, '+')) {
+            access = GENERIC_READ | GENERIC_WRITE;
         }
-        fp_win32 = (HANDLE) _get_osfhandle(_fileno(fp));
+
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, fname, -1, NULL, 0);
+        if (!wlen) {
+            throw std::runtime_error(format("failed to convert path %s", fname));
+        }
+        std::vector<wchar_t> wfname(wlen);
+        MultiByteToWideChar(CP_UTF8, 0, fname, -1, wfname.data(), wlen);
+
+        fp_win32 = CreateFileW(wfname.data(), access,
+                               FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+                               creation, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (fp_win32 == INVALID_HANDLE_VALUE) {
+            throw std::runtime_error(format("failed to open %s: %s", fname,
+                                            GetErrorMessageWin32(GetLastError()).c_str()));
+        }
+        fp = NULL;
+
         seek(0, SEEK_END);
         size = tell();
         seek(0, SEEK_SET);
@@ -159,8 +182,8 @@ struct llama_file::impl {
     }
 
     ~impl() {
-        if (fp) {
-            std::fclose(fp);
+        if (fp_win32 != INVALID_HANDLE_VALUE) {
+            CloseHandle(fp_win32);
         }
     }
 #else
@@ -383,7 +406,8 @@ bool llama_file::has_direct_io() const { return pimpl->has_direct_io(); }
 
 int llama_file::file_id() const {
 #ifdef _WIN32
-    return _fileno(pimpl->fp);
+    // fp is NULL when using CreateFileW directly; no CRT fd available.
+    return -1;
 #else
     if (pimpl->fd != -1) {
         return pimpl->fd;
@@ -395,6 +419,10 @@ int llama_file::file_id() const {
 #endif
 #endif
 }
+
+#ifdef _WIN32
+void * llama_file::win32_handle() const { return pimpl->fp_win32; }
+#endif
 
 void llama_file::seek(size_t offset, int whence) const { pimpl->seek(offset, whence); }
 void llama_file::read_raw(void * ptr, size_t len) { pimpl->read_raw(ptr, len); }
@@ -511,7 +539,7 @@ struct llama_mmap::impl {
 
         size = file->size();
 
-        HANDLE hFile = (HANDLE) _get_osfhandle(file->file_id());
+        HANDLE hFile = (HANDLE) file->win32_handle();
 
         hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
 
