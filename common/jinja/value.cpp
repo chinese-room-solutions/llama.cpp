@@ -161,6 +161,11 @@ static value tojson(const func_args & args) {
     value val_separators = args.get_kwarg_or_pos("separators",   3);
     value val_sort       = args.get_kwarg_or_pos("sort_keys",    4);
     int indent = -1;
+    if (args.ctx.is_get_stats) {
+        // mark as used (recursively) for stats
+        auto val_input = args.get_pos(0);
+        value_t::stats_t::mark_used(const_cast<value&>(val_input), true);
+    }
     if (is_val<value_int>(val_indent)) {
         indent = static_cast<int>(val_indent->as_int());
     }
@@ -460,8 +465,9 @@ const func_builtins & value_int_t::get_builtins() const {
             double val = static_cast<double>(args.get_pos(0)->as_int());
             return mk_val<value_float>(val);
         }},
-        {"tojson", tojson},
+        {"safe", tojson},
         {"string", tojson},
+        {"tojson", tojson},
     };
     return builtins;
 }
@@ -480,8 +486,9 @@ const func_builtins & value_float_t::get_builtins() const {
             int64_t val = static_cast<int64_t>(args.get_pos(0)->as_float());
             return mk_val<value_int>(val);
         }},
-        {"tojson", tojson},
+        {"safe", tojson},
         {"string", tojson},
+        {"tojson", tojson},
     };
     return builtins;
 }
@@ -766,6 +773,11 @@ const func_builtins & value_string_t::get_builtins() const {
 
 
 const func_builtins & value_bool_t::get_builtins() const {
+    static const func_handler tostring = [](const func_args & args) -> value {
+        args.ensure_vals<value_bool>();
+        bool val = args.get_pos(0)->as_bool();
+        return mk_val<value_string>(val ? "True" : "False");
+    };
     static const func_builtins builtins = {
         {"default", default_value},
         {"int", [](const func_args & args) -> value {
@@ -778,11 +790,8 @@ const func_builtins & value_bool_t::get_builtins() const {
             bool val = args.get_pos(0)->as_bool();
             return mk_val<value_float>(val ? 1.0 : 0.0);
         }},
-        {"string", [](const func_args & args) -> value {
-            args.ensure_vals<value_bool>();
-            bool val = args.get_pos(0)->as_bool();
-            return mk_val<value_string>(val ? "True" : "False");
-        }},
+        {"safe", tostring},
+        {"string", tostring},
         {"tojson", tojson},
     };
     return builtins;
@@ -891,6 +900,11 @@ const func_builtins & value_array_t::get_builtins() const {
         }},
         {"string", [](const func_args & args) -> value {
             args.ensure_vals<value_array>();
+            if (args.ctx.is_get_stats) {
+                // mark as used (recursively) for stats
+                auto val_input = args.get_pos(0);
+                value_t::stats_t::mark_used(const_cast<value&>(val_input), true);
+            }
             return mk_val<value_string>(args.get_pos(0)->as_string());
         }},
         {"tojson", tojson},
@@ -1046,6 +1060,11 @@ const func_builtins & value_object_t::get_builtins() const {
         {"tojson", tojson},
         {"string", [](const func_args & args) -> value {
             args.ensure_vals<value_object>();
+            if (args.ctx.is_get_stats) {
+                // mark as used (recursively) for stats
+                auto val_input = args.get_pos(0);
+                value_t::stats_t::mark_used(const_cast<value&>(val_input), true);
+            }
             return mk_val<value_string>(args.get_pos(0)->as_string());
         }},
         {"length", [](const func_args & args) -> value {
@@ -1085,18 +1104,14 @@ const func_builtins & value_object_t::get_builtins() const {
 }
 
 const func_builtins & value_none_t::get_builtins() const {
+    static const func_handler tostring = [](const func_args &) -> value {
+        return mk_val<value_string>("None");
+    };
     static const func_builtins builtins = {
         {"default", default_value},
         {"tojson", tojson},
-        {"string", [](const func_args &) -> value {
-            return mk_val<value_string>("None");
-        }},
-        {"safe", [](const func_args &) -> value {
-            return mk_val<value_string>("None");
-        }},
-        {"strip", [](const func_args &) -> value {
-            return mk_val<value_string>("None");
-        }},
+        {"string", tostring},
+        {"safe", tostring},
         {"items", empty_value_fn<value_array>},
         {"map", empty_value_fn<value_array>},
         {"reject", empty_value_fn<value_array>},
@@ -1355,6 +1370,23 @@ std::string value_to_string_repr(const value & val) {
         }
     } else {
         return val->as_repr();
+    }
+}
+
+// stats utility
+void value_t::stats_t::mark_used(value & val, bool deep) {
+    val->stats.used = true;
+    if (deep) {
+        if (is_val<value_array>(val)) {
+            for (auto & item : val->val_arr) {
+                mark_used(item, deep);
+            }
+        } else if (is_val<value_object>(val)) {
+            for (auto & pair : val->val_obj) {
+                mark_used(pair.first, deep);
+                mark_used(pair.second, deep);
+            }
+        }
     }
 }
 
